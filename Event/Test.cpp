@@ -7,25 +7,31 @@ using namespace std;
 
 class TestClass
 {
-
+public:
+    Event test_event;
 };
 
-class TestEvent : EnableEventMap(TestClass, TestEvent)
+class TestHandlerClass : EnableEventHandler
 {
 public:
-    using Event<TestClass>::Event;
+    void fun() { cout << "Handled!" << endl; }
 };
 
 int main()
 {
-    TestClass object;
-    EventHandler<TestEvent> event_handler(&object,
-        [](auto)
-    {
-        cout << "Event handler is invoked!" << endl;
-    });
+    TestClass test;
+    test.test_event += [] { cout << "Hello world!!!" << endl; };
+    SendEvent(test.test_event);
 
-    SendEvent<TestEvent>(&object);
+    auto handler = new TestHandlerClass;
+    
+    test.test_event += EventHandler(handler, &TestHandlerClass::fun);
+
+    SendEvent(test.test_event);
+
+    delete handler;
+
+    SendEvent(test.test_event);
 
     getchar();
 

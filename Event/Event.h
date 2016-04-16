@@ -1,232 +1,193 @@
 #pragma once
-#include <set>
+#include <utility>
 #include <map>
 #include <type_traits>
 
-#include "Function.h"
-
-#define EnableEventMap(senderClass, eventClass) public Event<senderClass>, public cru::internal_event_::EventHandlerMap_<senderClass, eventClass>
+#define EnableEventHandler public cru::BeEventHandler
 
 namespace cru
 {
-    //forward declarations
-    template<typename Event_>
-    int SendEvent(Event_&);
+    class Event;
+    class BeEventHandler;
 
     namespace internal_event_
     {
-        template<typename Sender_, typename Event_>
-        class EventHandlerMap_;
+        class EventHandler_
+        {
+        public:
+            virtual EventHandler_*  Clone()       const = 0;
+            virtual void            Handle()      const = 0;
+        };
+
+        class FunctionPointer_ : public EventHandler_
+        {
+        public:
+            using FunctionPointer = void(*)();
+
+            FunctionPointer_(FunctionPointer pointer) : pointer_(pointer) { }
+
+            FunctionPointer_*       Clone() const override { return new FunctionPointer_(pointer_); }
+            void                    Handle() const override { return (*pointer_)(); }
+        private:
+            FunctionPointer pointer_;
+        };
+
+        template<typename C>
+        class MemberFunctionPointer_ : public EventHandler_
+        {
+        public:
+            using ObjectPointer = C*;
+            typedef void(C::*MemberFunctionPointer)();
+
+            MemberFunctionPointer_(ObjectPointer object, MemberFunctionPointer pointer)
+                : object_(object), pointer_(pointer) { }
+
+            MemberFunctionPointer_* Clone() const override { return new MemberFunctionPointer_(object_, pointer_); }
+            void                    Handle() const override { return (object_->*pointer_)(); }
+        private:
+            ObjectPointer object_;
+            MemberFunctionPointer pointer_;
+        };
+
+        template<typename C>
+        class Functor_ : public EventHandler_
+        {
+        public:
+            using ObjectPointer = C*;
+
+            Functor_(ObjectPointer object) : object_(object) { }
+
+            Functor_*               Clone() const override { return new Functor_(object_); }
+            void                    Handle() const override { return (*object_)(); }
+        private:
+            ObjectPointer object_;
+        };
+
+        template<typename C>
+        class Lambda_ : public EventHandler_
+        {
+        public:
+            using LambdaClass = C;
+
+            Lambda_(const LambdaClass& lambda) : lambda_(lambda) { }
+
+            Lambda_*                Clone() const override { return new Lambda_(lambda_); }
+            void                    Handle() const override { return lambda_(); }
+        private:
+            LambdaClass lambda_;
+        };
     }
 
 
-
-    template<typename Event_>
     class EventHandler
     {
-        friend internal_event_::EventHandlerMap_<typename Event_::Sender, Event_>;
     public:
-        using EventClass = Event_;
-        using Sender = typename EventClass::Sender;
-        using FunctionType = Function<void(EventClass&)>;
-
         EventHandler() = default;
-        template<typename... Args>
-        EventHandler(Sender* specified_sender, Args&&... function);
-        EventHandler(EventHandler&& other);
+        EventHandler(void(*functionPointer)())
+            : function_(new internal_event_::FunctionPointer_(functionPointer)) { }
+        template<typename C>
+        EventHandler(C* object, void(C::*functionPointer)())
+            : function_(new internal_event_::MemberFunctionPointer_<C>(object, functionPointer))
+        {
+            static_assert(std::is_base_of<BeEventHandler, C>::value,
+                "The class of the object isn't able to be EventHandler.");
+            object_ = object;
+        }
+        template<typename C>
+        EventHandler(C* object)
+            : function_(new internal_event_::Functor_<C>(object))
+        {
+            static_assert(std::is_base_of<BeEventHandler, C>::value,
+                "The class of the object isn't able to be EventHandler.");
+            object_ = object;
+        }
+        template<typename Lambda>
+        EventHandler(const Lambda& lambda)
+            : function_(new internal_event_::Lambda_<Lambda>(lambda)) { }
+
+        EventHandler(const EventHandler& other)
+            : function_(other.function_->Clone()), object_(other.object_) { }
+        EventHandler(EventHandler&& other)
+            : function_(other.function_), object_(other.object_) { other.function_ = nullptr; }
+        EventHandler& operator = (const EventHandler& other);
         EventHandler& operator = (EventHandler&& other);
-        ~EventHandler();
+        ~EventHandler() { Destroy_(); }
 
-        bool GetState() const { return listening_state_; }
-        Sender* GetSender() const { return specified_sender_; }
-        FunctionType GetFunction() const { return function_; }
+        BeEventHandler* GetObject() const
+        {
+            return object_;
+        };
 
-        void TurnOn();
-        void TurnOff();
-        void Set(Sender* specified_sender);
-        template<typename... Args>
-        void Set(Args&&... function);
+        void operator()() const
+        {
+            if (function_)
+                function_->Handle();
+        }
 
     private:
-        void HandleEvent(EventClass& event_) const { function_(event_); }
+        void Destroy_() { if (function_) delete function_; }
 
-        Sender* specified_sender_ = nullptr;
-        bool listening_state_ = false;
-        FunctionType function_;
+        internal_event_::EventHandler_* function_ = nullptr;
+        BeEventHandler*                 object_ = nullptr;
     };
 
-    template<typename Event_>
-    template<typename ...Args>
-    EventHandler<Event_>::EventHandler(Sender * specified_sender, Args && ...function)
-        : specified_sender_(specified_sender), function_(std::forward<Args>(function)...)
-    {
-        TurnOn();
-    }
 
-    template<typename Event_>
-    template<typename ...Args>
-    void EventHandler<Event_>::Set(Args && ...function)
-    {
-        function_ = FunctionType(std::forward<Args>(function)...);
-    }
-
-    template<typename Event_>
-    EventHandler<Event_>::EventHandler(EventHandler && other)
-        : specified_sender_(other.specified_sender_), listening_state_(other.listening_state_), function_(std::move(other.function_))
-    {
-        if (listening_state_)
-        {
-            EventClass::RemoveHandlerFromMap(&other, false);
-            EventClass::AddHandlerToMap(this);
-        }
-    }
-
-    template<typename Event_>
-    EventHandler<Event_> & EventHandler<Event_>::operator=(EventHandler && other)
-    {
-        if (this != &other)
-        {
-            TurnOff();
-            specified_sender_ = other.specified_sender_;
-            function_ = std::move(other.function_);
-            listening_state_ = other.listening_state_;
-            if (listening_state_)
-            {
-                EventClass::RemoveHandlerFromMap(&other, false);
-                EventClass::AddHandlerToMap(this);
-            }
-        }
-        return *this;
-    }
-
-    template<typename Event_>
-    EventHandler<Event_>::~EventHandler()
-    {
-        TurnOff();
-    }
-
-    template<typename Event_>
-    void EventHandler<Event_>::TurnOn()
-    {
-        if (!listening_state_)
-        {
-            EventClass::AddHandlerToMap(this);
-            listening_state_ = true;
-        }
-    }
-
-    template<typename Event_>
-    inline void EventHandler<Event_>::TurnOff()
-    {
-        if (listening_state_)
-        {
-            EventClass::RemoveHandlerFromMap(this);
-            listening_state_ = false;
-        }
-    }
-
-    template<typename Event_>
-    void EventHandler<Event_>::Set(Sender * specified_sender)
-    {
-        TurnOff();
-        specified_sender_ = specified_sender;
-        TurnOn();
-    }
-
-
-
-    template<typename Sender_>
     class Event
     {
     public:
-        using Sender = Sender_;
-        Event(Sender* sender) : sender_(sender) { }
-        Sender* GetSender() const { return sender_; }
+        Event() = default;
+        Event(const Event&) = delete;
+        Event(Event&&) = delete;
+        Event& operator = (const Event&) = delete;
+        Event& operator = (Event&&) = delete;
+
+        Event& operator += (const EventHandler& handler) { AddHandler(handler); return *this; }
+        Event& operator += (EventHandler&& handler) { AddHandler(std::move(handler)); return *this; }
+
+        template<typename... Args>
+        void AddHandler(Args&&... args);
+        void Raise() const { handlers_.Handle(); }
+
     private:
-        Sender* sender_;
-    };
-
-    namespace internal_event_
-    {
-        template<typename SpecificEvent, typename Sender>
-        constexpr bool baseOnEvent_()
+        class EventHandlerMap
         {
-            return std::is_base_of<Event<Sender>, SpecificEvent>::value;
-        }
+        public:
+            EventHandlerMap() = default;
+            ~EventHandlerMap();
 
+            void AddHandler(const EventHandler&);
+            void AddHandler(EventHandler&&);
+            void RemoveHandler(BeEventHandler* object);
 
-        template<typename Sender_, typename Event_>
-        class EventHandlerMap_
-        {
-            friend class cru::EventHandler<Event_>;
-            friend int cru::SendEvent(Event_&);
+            void Handle() const;
         private:
-            using EventClass = Event_;
-            using SenderPrivate_ = Sender_;
-            using Handler = EventHandler<EventClass>;
-
-            static int HandleEvent(EventClass& event_);
-            static int HandleEvent_helper_(EventClass& event_, SenderPrivate_* sender);
-            static void AddHandlerToMap(Handler* handler);
-            static void RemoveHandlerFromMap(Handler* handler, bool clean = true);
-
-            static std::map<SenderPrivate_*, std::set<Handler*>> event_handler_map_;
+            using EventHandlerMap_ = std::multimap<BeEventHandler*, EventHandler>;
+            EventHandlerMap_* map_ = nullptr;
         };
 
-        template<typename Sender_, typename Event_>
-        std::map<Sender_*, std::set<EventHandler<Event_>*>> EventHandlerMap_<Sender_, Event_>::event_handler_map_;
+        EventHandlerMap handlers_;
+    };
 
-
-        template<typename Sender_, typename Event_>
-        int EventHandlerMap_<Sender_, Event_>::HandleEvent(EventClass & event)
-        {
-            int result = 0;
-            result += HandleEvent_helper_(event, nullptr);
-            if (event.GetSender())
-                result += HandleEvent_helper_(event, event.GetSender());
-            return result;
-        }
-
-        template<typename Sender_, typename Event_>
-        int EventHandlerMap_<Sender_, Event_>::HandleEvent_helper_(EventClass & event, SenderPrivate_ * sender)
-        {
-            int result = 0;
-            auto handlers = event_handler_map_.find(sender);
-            if (handlers != event_handler_map_.end())
-                for (auto i : handlers->second)
-                {
-                    i->HandleEvent(event);
-                    result++;
-                }
-            return result;
-        }
-
-        template<typename Sender_, typename Event_>
-        void EventHandlerMap_<Sender_, Event_>::AddHandlerToMap(Handler * handler)
-        {
-            event_handler_map_[handler->GetSender()].insert(handler);
-        }
-
-        template<typename Sender_, typename Event_>
-        void EventHandlerMap_<Sender_, Event_>::RemoveHandlerFromMap(Handler * handler, bool clean)
-        {
-            event_handler_map_[handler->GetSender()].erase(handler);
-            if (clean)
-                if (event_handler_map_[handler->GetSender()].empty())
-                    event_handler_map_.erase(handler->GetSender());
-        }
+    template<typename ...Args>
+    void Event::AddHandler(Args && ...args)
+    {
+        EventHandler handler(std::forward<Args>(args)...);
+        handlers_.AddHandler(std::move(handler));
+        auto object = handler.GetObject();
+        if (object)
+            object->destruction_event += [this, object] { handlers_.RemoveHandler(object); };
     }
 
-    template<typename Event_>
-    int SendEvent(Event_& event)
+    class BeEventHandler
     {
-        return Event_::HandleEvent(event);
-    }
+    public:
+        ~BeEventHandler();
+    public:
+        Event destruction_event;
+    };
 
-    template<typename Event_, typename... Args>
-    int SendEvent(Args&&... args)
+    inline void SendEvent(const Event& event)
     {
-        Event_ event(std::forward<Args>(args)...);
-        return SendEvent(event);
+        return event.Raise();
     }
 }
